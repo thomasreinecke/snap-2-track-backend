@@ -45,11 +45,15 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         print(f"   🤖 AI: {json.dumps(ai_result, indent=2)}")
         
         if ai_result.get("is_food", False) is True:
-            friendly_id = _generate_friendly_id()
+            # Generate ID based on the detected meal type (e.g. dec-15-lunch)
+            detected_type = ai_result.get("meal_type", "snack")
+            friendly_id = _generate_friendly_id(session, user.id, detected_type)
+            
             new_meal = Meal(user_id=user.id, friendly_id=friendly_id, status="draft", image_id=img_id)
             session.add(new_meal)
             session.commit()
             session.refresh(new_meal)
+            
             _save_log(session, new_meal.id, ai_result)
             active_meal = new_meal
             bot_reply_text = ai_result.get("reply_text")
@@ -58,17 +62,26 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
             active_meal = None 
         
     elif text and active_meal:
+        # User is replying to the context of the last meal
         last_log = session.exec(select(NutritionLog).where(NutritionLog.meal_id == active_meal.id)).first()
         current_data = json.loads(last_log.raw_json) if last_log else {}
+        
         ai_result = await analyze_text_correction(current_data, text)
         print(f"   🤖 Correction: {json.dumps(ai_result, indent=2)}")
+        
         _update_log(session, last_log, ai_result)
         bot_reply_text = ai_result.get("reply_text", "Updated.")
         
     else:
         bot_reply_text = "Please send a photo to start tracking! 📸"
 
-    bot_msg = Message(user_id=user.id, meal_id=active_meal.id if active_meal else None, sender="bot", text=bot_reply_text)
+    # Link bot message to the active meal context
+    bot_msg = Message(
+        user_id=user.id, 
+        meal_id=active_meal.id if active_meal else None, 
+        sender="bot", 
+        text=bot_reply_text
+    )
     session.add(bot_msg)
     session.commit()
 
@@ -134,9 +147,8 @@ def get_chat_history(session: Session, user_identifier: str):
     msgs = session.exec(select(Message).where(Message.user_id == user.id).order_by(Message.timestamp)).all()
     
     results = []
-    print(f"\n📂 [HISTORY] Fetching {len(msgs)} messages")
     for m in msgs:
-        # Relative path only
+        # Relative path only - Frontend handles domain
         img_url = None
         if m.image_id:
             img_url = f"/api/image/{str(m.image_id)}"
@@ -183,6 +195,7 @@ def get_user_history_summary(session: Session, user_identifier: str):
         day_entry["meals"].append({
             "id": str(meal.id),
             "time": meal.created_at.strftime("%H:%M"),
+            "friendly_id": meal.friendly_id, # Added friendly_id for UI
             "name": log.item_name,
             "calories": log.calories_kcal,
             "image_url": img_url
@@ -192,12 +205,27 @@ def get_user_history_summary(session: Session, user_identifier: str):
     result.sort(key=lambda x: x["date"], reverse=True)
     return result
 
-# Helpers
 def _get_latest_active_meal(session, user_id):
     return session.exec(select(Meal).where(Meal.user_id == user_id).order_by(Meal.created_at.desc())).first()
 
-def _generate_friendly_id():
-    return datetime.now().strftime("%b-%d-%H%M").lower()
+def _generate_friendly_id(session, user_id, meal_type):
+    # Format: dec-15-lunch
+    now = datetime.now()
+    base_date = now.strftime("%b-%d").lower() # dec-15
+    type_slug = meal_type.lower()
+    
+    base_id = f"{base_date}-{type_slug}"
+    
+    # Check for collisions to add index
+    # We look for any ID that starts with this base
+    query = select(Meal).where(Meal.user_id == user_id).where(Meal.friendly_id.like(f"{base_id}%"))
+    existing_meals = session.exec(query).all()
+    
+    if not existing_meals:
+        return base_id
+    
+    # If exists, append count + 1
+    return f"{base_id}-{len(existing_meals) + 1}"
 
 def _map_data_to_log(log, data):
     nutri = data.get("nutrition", {})
