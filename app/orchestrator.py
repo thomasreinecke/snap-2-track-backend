@@ -10,9 +10,6 @@ from collections import defaultdict
 from uuid import UUID
 import traceback
 
-# FIXED: Read from BACKEND_ENDPOINT as requested
-BACKEND_ENDPOINT = os.getenv("BACKEND_ENDPOINT", "http://localhost:8000").rstrip("/")
-
 async def handle_message(session: Session, user_identifier: str, text: str = None, image_bytes: bytes = None):
     print(f"\n📨 [NEW MSG] User: {user_identifier} | Text: {text} | Img: {len(image_bytes) if image_bytes else 0}b")
 
@@ -24,7 +21,7 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         session.commit()
         session.refresh(user)
 
-    # 2. Image (Stored in DB)
+    # 2. Image
     img_id = None
     if image_bytes:
         new_image = ImageStore(data=image_bytes, mime_type="image/jpeg")
@@ -139,9 +136,10 @@ def get_chat_history(session: Session, user_identifier: str):
     results = []
     print(f"\n📂 [HISTORY] Fetching {len(msgs)} messages")
     for m in msgs:
+        # Relative path only
         img_url = None
         if m.image_id:
-            img_url = f"{BACKEND_ENDPOINT}/api/image/{str(m.image_id)}"
+            img_url = f"/api/image/{str(m.image_id)}"
         
         results.append({
             "id": str(m.id),
@@ -177,9 +175,10 @@ def get_user_history_summary(session: Session, user_identifier: str):
         day_entry["totals"]["fat"] += log.fat_g
         day_entry["totals"]["fiber"] += log.fiber_g 
         
+        # Relative path only
         img_url = None
         if meal.image_id:
-            img_url = f"{BACKEND_ENDPOINT}/api/image/{str(meal.image_id)}"
+            img_url = f"/api/image/{str(meal.image_id)}"
 
         day_entry["meals"].append({
             "id": str(meal.id),
