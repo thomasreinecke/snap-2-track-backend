@@ -46,7 +46,6 @@ async def analyze_image_local(image_bytes: bytes, context: str = ""):
     }
     """
 
-    # --- UPDATED PROMPT: VISUAL + MACROS, NO PREACHING ---
     system_prompt = f"""You are 'Snap-2-Track'. Analyze the food image. Context: "{context}"
     
     GUIDELINES FOR 'reply_text':
@@ -92,7 +91,7 @@ async def analyze_text_correction(current_log: dict, user_text: str):
     Task:
     1. Update 'item_name', 'nutrition' totals.
     2. 'reply_text': Confirm the change AND list the new total macros. 
-    3. NO PREACHING. No health warnings.
+    3. NO PREACHING.
 
     Return ONLY the updated JSON.
     """
@@ -112,12 +111,20 @@ def _clean_json(text: str):
     end_idx = text.rfind('}')
     if start_idx != -1 and end_idx != -1:
         text = text[start_idx : end_idx + 1]
+    
+    data = {}
     try:
-        return json.loads(text)
+        data = json.loads(text)
     except json.JSONDecodeError:
-        return {
+        data = {
             "is_food": False,
             "item_name": "Parsing Error",
             "reply_text": "I saw the food, but I tripped over the math. Try again? 📉",
             "reasoning": f"Raw output: {text[:50]}..."
         }
+    
+    # Strip whitespace from reply_text if it exists
+    if "reply_text" in data and isinstance(data["reply_text"], str):
+        data["reply_text"] = data["reply_text"].strip()
+        
+    return data

@@ -48,6 +48,9 @@ class NutritionLog(SQLModel, table=True):
     fat_g: int
     fiber_g: int = Field(default=0)
     
+    # New Field
+    edited: bool = Field(default=False)
+    
     confidence_score: float = Field(default=0.0)
     reasoning: Optional[str] = None
     
