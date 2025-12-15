@@ -1,0 +1,801 @@
+[FILE START] path=app/__init__.py lang=python
+
+
+[FILE END] path=app/__init__.py
+
+[FILE START] path=app/ai_engine.py lang=python
+
+# app/ai_engine.py
+import os
+import base64
+import json
+from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
+
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+MODEL_ID = os.getenv("MODEL_ID", "qwen/qwen-2-vl-72b-instruct")
+SITE_URL = os.getenv("SITE_URL", "http://localhost:3000")
+APP_NAME = os.getenv("APP_NAME", "Snap-2-Track")
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY,
+    default_headers={
+        "HTTP-Referer": SITE_URL,
+        "X-Title": APP_NAME,
+    }
+)
+
+async def analyze_image_local(image_bytes: bytes, context: str = ""):
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    image_url = f"data:image/jpeg;base64,{base64_image}"
+
+    schema_definition = """
+    {
+        "is_food": boolean, 
+        "item_name": "Short name",
+        "meal_type": "breakfast|lunch|dinner|snack",
+        "is_composed_meal": true, 
+        "estimated_weight_g": <int>,
+        "nutrition": {
+            "calories_kcal": <int>,
+            "protein_g": <int>,
+            "carbs_g": <int>,
+            "fat_g": <int>,
+            "fiber_g": <int>
+        },
+        "dietary_flags": ["string"],
+        "confidence_score": <float 0.0-1.0>,
+        "reasoning": "Technical reasoning",
+        "reply_text": "Response to user"
+    }
+    """
+
+    # --- UPDATED PROMPT: VISUAL + MACROS, NO PREACHING ---
+    system_prompt = f"""You are 'Snap-2-Track'. Analyze the food image. Context: "{context}"
+    
+    GUIDELINES FOR 'reply_text':
+    1. **Describe Visuals:** Briefly describe what you see (colors, textures, plating).
+    2. **State Macros:** You MUST explicitly list the identified macros in the text (e.g. "I estimate ~500 kcal, 30g Protein, ...").
+    3. **NO PREACHING:** Do NOT give health advice, do NOT say "watch your sugar", do NOT say "this is a healthy choice". Just state the facts of the food.
+    4. **Tone:** Neutral, observant, professional but casual.
+    
+    If text context adds items (e.g. "plus a beer"), include them in math and text.
+
+    Return ONLY valid JSON:
+    {schema_definition}
+    """
+
+    print(f"🚀 Sending request to OpenRouter ({MODEL_ID})...")
+
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}
+            ],
+            temperature=0.2, 
+            max_tokens=1000
+        )
+        return _clean_json(response.choices[0].message.content)
+
+    except Exception as e:
+        print(f"❌ OpenRouter API Error: {str(e)}")
+        return {
+            "is_food": False,
+            "item_name": "API Error",
+            "reply_text": f"My brain is offline momentarily! 🤯 Error: {str(e)}",
+            "nutrition": {"calories_kcal": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
+        }
+
+async def analyze_text_correction(current_log: dict, user_text: str):
+    prompt = f"""
+    Current Meal Data: {json.dumps(current_log)}
+    User Correction: "{user_text}"
+    
+    Task:
+    1. Update 'item_name', 'nutrition' totals.
+    2. 'reply_text': Confirm the change AND list the new total macros. 
+    3. NO PREACHING. No health warnings.
+
+    Return ONLY the updated JSON.
+    """
+    try:
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2
+        )
+        return _clean_json(response.choices[0].message.content)
+    except Exception as e:
+        return current_log
+
+def _clean_json(text: str):
+    text = text.replace("```json", "").replace("```", "").strip()
+    start_idx = text.find('{')
+    end_idx = text.rfind('}')
+    if start_idx != -1 and end_idx != -1:
+        text = text[start_idx : end_idx + 1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {
+            "is_food": False,
+            "item_name": "Parsing Error",
+            "reply_text": "I saw the food, but I tripped over the math. Try again? 📉",
+            "reasoning": f"Raw output: {text[:50]}..."
+        }
+[FILE END] path=app/ai_engine.py
+
+[FILE START] path=app/database.py lang=python
+
+# snap-2-track-backend/app/database.py
+from sqlmodel import SQLModel, create_engine, Session
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+# Build Postgres URL from individual env vars if DATABASE_URL is not set directly
+if not os.getenv("DATABASE_URL"):
+    db_user = os.getenv("DB_USER", "postgres")
+    db_pass = os.getenv("DB_PASSWORD", "password")
+    db_host = os.getenv("DB_HOST", "192.168.2.2")
+    db_port = os.getenv("DB_PORT", "5432")
+    db_name = os.getenv("DB_DATABASE", "snap2track")
+    DATABASE_URL = f"postgresql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+else:
+    DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Echo=False for production noise reduction
+engine = create_engine(DATABASE_URL, echo=False)
+
+def init_db():
+    SQLModel.metadata.create_all(engine)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+[FILE END] path=app/database.py
+
+[FILE START] path=app/main.py lang=python
+
+# app/main.py
+import os
+from fastapi import FastAPI, UploadFile, Form, Depends, File, HTTPException, Response
+from fastapi.middleware.cors import CORSMiddleware
+from sqlmodel import Session, select
+from .database import init_db, get_session
+from .models import ImageStore
+from .orchestrator import handle_message, get_user_history_summary, delete_meal, get_chat_history, reset_user
+from uuid import UUID
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], 
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
+@app.post("/api/chat")
+async def chat_endpoint(
+    text: str = Form(None),
+    image: UploadFile = File(None),
+    user_id: str = Form(...), 
+    session: Session = Depends(get_session)
+):
+    image_bytes = None
+    if image:
+        image_bytes = await image.read()
+    
+    response = await handle_message(session, user_id, text, image_bytes)
+    return response
+
+@app.get("/api/history/{user_id}")
+def history_endpoint(user_id: str, session: Session = Depends(get_session)):
+    return get_user_history_summary(session, user_id)
+
+@app.get("/api/chat/{user_id}")
+def chat_history_endpoint(user_id: str, session: Session = Depends(get_session)):
+    return get_chat_history(session, user_id)
+
+@app.get("/api/image/{image_id}")
+def get_image_endpoint(image_id: str, session: Session = Depends(get_session)):
+    try:
+        # Debug log
+        # print(f"🖼️ Fetching image {image_id}") 
+        uuid_obj = UUID(image_id)
+        image_record = session.exec(select(ImageStore).where(ImageStore.id == uuid_obj)).first()
+        
+        if not image_record:
+            raise HTTPException(status_code=404, detail="Image not found")
+        
+        return Response(content=image_record.data, media_type=image_record.mime_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid UUID")
+
+@app.delete("/api/meal/{meal_id}")
+def delete_meal_endpoint(meal_id: str, session: Session = Depends(get_session)):
+    success = delete_meal(session, meal_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    return {"status": "deleted"}
+
+@app.delete("/api/user/{user_id}")
+def reset_user_endpoint(user_id: str, session: Session = Depends(get_session)):
+    success = reset_user(session, user_id)
+    # Return success even if user not found, to ensure idempotency for reset
+    return {"status": "reset_complete"}
+[FILE END] path=app/main.py
+
+[FILE START] path=app/models.py lang=python
+
+# app/models.py
+from typing import Optional, List
+from datetime import datetime
+from sqlmodel import Field, SQLModel, Relationship
+from uuid import UUID, uuid4
+from sqlalchemy import Column, JSON, LargeBinary
+
+class ImageStore(SQLModel, table=True):
+    __tablename__ = "image_store"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    data: bytes = Field(sa_column=Column(LargeBinary))
+    mime_type: str = Field(default="image/jpeg")
+
+class User(SQLModel, table=True):
+    __tablename__ = "user"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    identifier: str = Field(index=True, unique=True)
+    platform: str = Field(default="web")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    meals: List["Meal"] = Relationship(back_populates="user")
+
+class Meal(SQLModel, table=True):
+    __tablename__ = "meal"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="user.id")
+    friendly_id: str 
+    status: str = Field(default="draft")
+    image_id: Optional[UUID] = Field(default=None, foreign_key="image_store.id")
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    
+    user: User = Relationship(back_populates="meals")
+    logs: List["NutritionLog"] = Relationship(back_populates="meal")
+
+class NutritionLog(SQLModel, table=True):
+    __tablename__ = "nutrition_log"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    meal_id: UUID = Field(foreign_key="meal.id")
+    
+    item_name: str
+    meal_type: str = Field(default="snack")
+    is_composed_meal: bool = Field(default=False)
+    estimated_weight_g: int = Field(default=0)
+    
+    calories_kcal: int
+    protein_g: int
+    carbs_g: int
+    fat_g: int
+    fiber_g: int = Field(default=0)
+    
+    confidence_score: float = Field(default=0.0)
+    reasoning: Optional[str] = None
+    
+    dietary_flags: List[str] = Field(default=[], sa_column=Column(JSON))
+    raw_json: str 
+    
+    meal: Meal = Relationship(back_populates="logs")
+
+class Message(SQLModel, table=True):
+    __tablename__ = "message"
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    user_id: UUID = Field(foreign_key="user.id")
+    meal_id: Optional[UUID] = Field(foreign_key="meal.id", nullable=True)
+    image_id: Optional[UUID] = Field(default=None, foreign_key="image_store.id")
+    sender: str 
+    text: Optional[str] = None
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+[FILE END] path=app/models.py
+
+[FILE START] path=app/orchestrator.py lang=python
+
+# app/orchestrator.py
+import os
+import uuid
+from sqlmodel import Session, select
+from .models import User, Meal, NutritionLog, Message, ImageStore
+from .ai_engine import analyze_image_local, analyze_text_correction
+from datetime import datetime
+import json
+from collections import defaultdict
+from uuid import UUID
+import traceback
+
+SITE_URL = os.getenv("SITE_URL", "http://localhost:8000")
+
+# ... [Previous handle_message code remains unchanged] ...
+async def handle_message(session: Session, user_identifier: str, text: str = None, image_bytes: bytes = None):
+    # (Keeping existing implementation for brevity, assuming context retention)
+    # ... but for the purpose of this output, I will just output the NEW function and the imports
+    # merging mentally with the previous file content.
+    # To ensure the file is complete, I will reprint the necessary parts or the whole file if requested.
+    # consistently following the rule: "Always return complete file content".
+    # So I must output the full file.
+    
+    print(f"\n📨 [NEW MSG] User: {user_identifier} | Text: {text} | Img: {len(image_bytes) if image_bytes else 0}b")
+
+    # 1. User
+    user = session.exec(select(User).where(User.identifier == user_identifier)).first()
+    if not user:
+        user = User(identifier=user_identifier)
+        session.add(user)
+        session.commit()
+        session.refresh(user)
+
+    # 2. Image
+    img_id = None
+    if image_bytes:
+        new_image = ImageStore(data=image_bytes, mime_type="image/jpeg")
+        session.add(new_image)
+        session.commit()
+        session.refresh(new_image)
+        img_id = new_image.id
+
+    # 3. Message Log
+    user_msg = Message(user_id=user.id, sender="user", text=text, image_id=img_id)
+    session.add(user_msg)
+    
+    active_meal = _get_latest_active_meal(session, user.id)
+    ai_result = {}
+    bot_reply_text = ""
+
+    # 4. Processing
+    if image_bytes:
+        context_str = text if text else "New meal log"
+        ai_result = await analyze_image_local(image_bytes, context=context_str)
+        print(f"   🤖 AI: {json.dumps(ai_result, indent=2)}")
+        
+        if ai_result.get("is_food", False) is True:
+            friendly_id = _generate_friendly_id()
+            new_meal = Meal(user_id=user.id, friendly_id=friendly_id, status="draft", image_id=img_id)
+            session.add(new_meal)
+            session.commit()
+            session.refresh(new_meal)
+            _save_log(session, new_meal.id, ai_result)
+            active_meal = new_meal
+            bot_reply_text = ai_result.get("reply_text")
+        else:
+            bot_reply_text = ai_result.get("reply_text", "That doesn't look like food.")
+            active_meal = None 
+        
+    elif text and active_meal:
+        last_log = session.exec(select(NutritionLog).where(NutritionLog.meal_id == active_meal.id)).first()
+        current_data = json.loads(last_log.raw_json) if last_log else {}
+        ai_result = await analyze_text_correction(current_data, text)
+        print(f"   🤖 Correction: {json.dumps(ai_result, indent=2)}")
+        _update_log(session, last_log, ai_result)
+        bot_reply_text = ai_result.get("reply_text", "Updated.")
+        
+    else:
+        bot_reply_text = "Please send a photo to start tracking! 📸"
+
+    bot_msg = Message(user_id=user.id, meal_id=active_meal.id if active_meal else None, sender="bot", text=bot_reply_text)
+    session.add(bot_msg)
+    session.commit()
+
+    return {
+        "reply": bot_reply_text,
+        "transaction_id": active_meal.friendly_id if active_meal else None,
+        "data": ai_result if ai_result.get("is_food", False) else None
+    }
+
+def reset_user(session: Session, user_identifier: str):
+    print(f"\n🧨 [RESET] User: {user_identifier}")
+    try:
+        user = session.exec(select(User).where(User.identifier == user_identifier)).first()
+        if not user:
+            print("   ❌ User not found.")
+            return False
+
+        # Collect Image IDs to delete (orphaned images cleanup)
+        # 1. From Messages
+        msgs = session.exec(select(Message).where(Message.user_id == user.id)).all()
+        img_ids = {m.image_id for m in msgs if m.image_id}
+        
+        # 2. From Meals
+        meals = session.exec(select(Meal).where(Meal.user_id == user.id)).all()
+        for m in meals:
+            if m.image_id:
+                img_ids.add(m.image_id)
+        
+        # Delete User (Cascades to Meals -> Logs, and Messages)
+        session.delete(user)
+        session.commit()
+        
+        # Delete Images
+        if img_ids:
+            print(f"   🗑️ Deleting {len(img_ids)} images...")
+            for iid in img_ids:
+                img = session.exec(select(ImageStore).where(ImageStore.id == iid)).first()
+                if img: session.delete(img)
+            session.commit()
+            
+        print("   ✅ User reset complete.")
+        return True
+    except Exception as e:
+        session.rollback()
+        print(f"   ❌ Error resetting user: {e}")
+        traceback.print_exc()
+        return False
+
+def delete_meal(session: Session, meal_id: str):
+    print(f"\n🗑️ [DELETE] ID: {meal_id}")
+    try:
+        clean_id = meal_id.strip()
+        uuid_obj = UUID(clean_id)
+        meal = session.exec(select(Meal).where(Meal.id == uuid_obj)).first()
+        
+        if not meal:
+            print("   ❌ Not found.")
+            return False
+        
+        logs = session.exec(select(NutritionLog).where(NutritionLog.meal_id == uuid_obj)).all()
+        for log in logs: session.delete(log)
+            
+        msgs = session.exec(select(Message).where(Message.meal_id == uuid_obj)).all()
+        for m in msgs: session.delete(m)
+
+        session.delete(meal)
+        session.commit()
+        print("   ✅ Deleted.")
+        return True
+
+    except Exception as e:
+        session.rollback()
+        print(f"   ❌ Exception: {e}")
+        traceback.print_exc()
+        return False
+
+def get_chat_history(session: Session, user_identifier: str):
+    user = session.exec(select(User).where(User.identifier == user_identifier)).first()
+    if not user: return []
+    
+    msgs = session.exec(select(Message).where(Message.user_id == user.id).order_by(Message.timestamp)).all()
+    
+    results = []
+    print(f"\n📂 [HISTORY] Fetching {len(msgs)} messages for {user_identifier}")
+    for m in msgs:
+        img_url = None
+        if m.image_id:
+            img_url = f"{SITE_URL}/api/image/{str(m.image_id)}"
+        
+        results.append({
+            "id": str(m.id),
+            "sender": m.sender,
+            "text": m.text,
+            "imageUrl": img_url,
+            "timestamp": m.timestamp
+        })
+    return results
+
+def get_user_history_summary(session: Session, user_identifier: str):
+    user = session.exec(select(User).where(User.identifier == user_identifier)).first()
+    if not user: return []
+
+    meals = session.exec(select(Meal).where(Meal.user_id == user.id).order_by(Meal.created_at.desc())).all()
+    
+    history_map = defaultdict(lambda: {
+        "date": "",
+        "totals": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0, "fiber": 0},
+        "meals": []
+    })
+
+    for meal in meals:
+        log = session.exec(select(NutritionLog).where(NutritionLog.meal_id == meal.id)).first()
+        if not log: continue
+
+        date_key = meal.created_at.strftime("%Y-%m-%d")
+        day_entry = history_map[date_key]
+        day_entry["date"] = date_key
+        day_entry["totals"]["calories"] += log.calories_kcal
+        day_entry["totals"]["protein"] += log.protein_g
+        day_entry["totals"]["carbs"] += log.carbs_g
+        day_entry["totals"]["fat"] += log.fat_g
+        day_entry["totals"]["fiber"] += log.fiber_g 
+        
+        img_url = None
+        if meal.image_id:
+            img_url = f"{SITE_URL}/api/image/{str(meal.image_id)}"
+
+        day_entry["meals"].append({
+            "id": str(meal.id),
+            "time": meal.created_at.strftime("%H:%M"),
+            "name": log.item_name,
+            "calories": log.calories_kcal,
+            "image_url": img_url
+        })
+
+    result = list(history_map.values())
+    result.sort(key=lambda x: x["date"], reverse=True)
+    return result
+
+# Helpers
+def _get_latest_active_meal(session, user_id):
+    return session.exec(select(Meal).where(Meal.user_id == user_id).order_by(Meal.created_at.desc())).first()
+
+def _generate_friendly_id():
+    return datetime.now().strftime("%b-%d-%H%M").lower()
+
+def _map_data_to_log(log, data):
+    nutri = data.get("nutrition", {})
+    log.item_name = data.get("item_name", "Unknown")
+    log.meal_type = data.get("meal_type", "snack")
+    log.is_composed_meal = data.get("is_composed_meal", False)
+    log.estimated_weight_g = data.get("estimated_weight_g", 0)
+    log.calories_kcal = nutri.get("calories_kcal", 0)
+    log.protein_g = nutri.get("protein_g", 0)
+    log.carbs_g = nutri.get("carbs_g", 0)
+    log.fat_g = nutri.get("fat_g", 0)
+    log.fiber_g = nutri.get("fiber_g", 0)
+    log.confidence_score = data.get("confidence_score", 0.0)
+    log.reasoning = data.get("reasoning", "")
+    log.dietary_flags = data.get("dietary_flags", [])
+    log.raw_json = json.dumps(data)
+
+def _save_log(session, meal_id, data):
+    log = NutritionLog(meal_id=meal_id)
+    _map_data_to_log(log, data)
+    session.add(log)
+    session.commit()
+
+def _update_log(session, log, data):
+    _map_data_to_log(log, data)
+    session.add(log)
+    session.commit()
+[FILE END] path=app/orchestrator.py
+
+[FILE START] path=Makefile lang=makefile
+
+# snap-2-track-backend/Makefile
+export PYTHONDONTWRITEBYTECODE=1
+
+VENV = .venv
+PYTHON = $(VENV)/bin/python
+PORT = 8000
+
+.PHONY: all install clean run dev run-batch
+
+all: install
+
+# -----------------------------------------------------------------------------
+# 🐍 Install virtual environment and dependencies
+# -----------------------------------------------------------------------------
+install:
+	@if [ ! -d "$(VENV)" ]; then \
+		echo "🐍 Creating virtual environment..."; \
+		python3 -m venv $(VENV); \
+		echo "🐍 Installing certifi..."; \
+		$(VENV)/bin/pip install certifi --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org; \
+		echo "🐍 Capturing certifi certificate bundle path and upgrading pip/installing requirements..."; \
+		CERT="$$( $(VENV)/bin/python -m certifi )"; \
+		echo "Certifi installed at: $$CERT"; \
+		echo "🐍 Upgrading pip..."; \
+		$(VENV)/bin/pip install --upgrade pip --cert=$$CERT --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org; \
+		echo "🐍 Installing remaining requirements..."; \
+		$(VENV)/bin/pip install -r requirements.txt --cert=$$CERT --trusted-host pypi.org --trusted-host pypi.python.org --trusted-host files.pythonhosted.org; \
+		echo "✅ Installation complete."; \
+	else \
+		echo "✅ Virtual environment already exists. Skipping installation."; \
+	fi
+
+# -----------------------------------------------------------------------------
+# 🚀 Run commands
+# -----------------------------------------------------------------------------
+run:
+	@echo "🚀 Starting Backend (Production)..."
+	@$(PYTHON) -m uvicorn app.main:app --host 0.0.0.0 --port $(PORT)
+
+dev:
+	@echo "🛠️  Starting Backend (Dev/Reload)..."
+	@$(PYTHON) -m uvicorn app.main:app --reload --host 0.0.0.0 --port $(PORT)
+
+run-batch:
+	@echo "📸 Processing images in ./pictures..."
+	@$(PYTHON) process_local_images.py
+
+# -----------------------------------------------------------------------------
+# 🧹 Cleanup
+# -----------------------------------------------------------------------------
+clean:
+	@echo "🧹 Cleaning up..."
+	@find . -type d -name "__pycache__" -exec rm -rf {} +
+	@rm -rf $(VENV)
+[FILE END] path=Makefile
+
+[FILE START] path=modelt.txt lang=text
+
+"-- =============================================
+-- DDL for public.image_store
+-- =============================================
+CREATE TABLE public.image_store (
+    id uuid NOT NULL,
+    data bytea NOT NULL,
+    mime_type character varying DEFAULT 'image/jpeg'::character varying,
+    CONSTRAINT image_store_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX image_store_pkey ON public.image_store USING btree (id);
+
+-- =============================================
+-- DDL for public.meal
+-- =============================================
+CREATE TABLE public.meal (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    friendly_id character varying NOT NULL,
+    status character varying DEFAULT 'draft'::character varying,
+    image_id uuid,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT meal_image_id_fkey FOREIGN KEY (image_id) REFERENCES image_store(id) ON DELETE SET NULL,
+    CONSTRAINT meal_user_id_fkey FOREIGN KEY (user_id) REFERENCES ""user""(id) ON DELETE CASCADE,
+    CONSTRAINT meal_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX meal_pkey ON public.meal USING btree (id);
+CREATE INDEX idx_meal_user_id ON public.meal USING btree (user_id);
+
+-- =============================================
+-- DDL for public.message
+-- =============================================
+CREATE TABLE public.message (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    meal_id uuid,
+    image_id uuid,
+    sender character varying NOT NULL,
+    text text,
+    ""timestamp"" timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT message_image_id_fkey FOREIGN KEY (image_id) REFERENCES image_store(id) ON DELETE SET NULL,
+    CONSTRAINT message_meal_id_fkey FOREIGN KEY (meal_id) REFERENCES meal(id) ON DELETE SET NULL,
+    CONSTRAINT message_user_id_fkey FOREIGN KEY (user_id) REFERENCES ""user""(id) ON DELETE CASCADE,
+    CONSTRAINT message_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX message_pkey ON public.message USING btree (id);
+CREATE INDEX idx_message_user_id ON public.message USING btree (user_id);
+
+-- =============================================
+-- DDL for public.nutrition_log
+-- =============================================
+CREATE TABLE public.nutrition_log (
+    id uuid NOT NULL,
+    meal_id uuid NOT NULL,
+    item_name character varying NOT NULL,
+    meal_type character varying DEFAULT 'snack'::character varying,
+    is_composed_meal boolean DEFAULT false,
+    estimated_weight_g integer DEFAULT 0,
+    calories_kcal integer NOT NULL,
+    protein_g integer NOT NULL,
+    carbs_g integer NOT NULL,
+    fat_g integer NOT NULL,
+    fiber_g integer DEFAULT 0,
+    confidence_score double precision DEFAULT 0.0,
+    reasoning text,
+    dietary_flags json,
+    raw_json text NOT NULL,
+    CONSTRAINT nutrition_log_meal_id_fkey FOREIGN KEY (meal_id) REFERENCES meal(id) ON DELETE CASCADE,
+    CONSTRAINT nutrition_log_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX nutrition_log_pkey ON public.nutrition_log USING btree (id);
+CREATE INDEX idx_nutrition_log_meal_id ON public.nutrition_log USING btree (meal_id);
+
+-- =============================================
+-- DDL for public.""user""
+-- =============================================
+CREATE TABLE public.""user"" (
+    id uuid NOT NULL,
+    identifier character varying NOT NULL,
+    platform character varying DEFAULT 'web'::character varying,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT user_pkey PRIMARY KEY (id),
+    CONSTRAINT user_identifier_key UNIQUE (identifier)
+);
+CREATE UNIQUE INDEX user_pkey ON public.""user"" USING btree (id);
+CREATE UNIQUE INDEX user_identifier_key ON public.""user"" USING btree (identifier);
+"
+[FILE END] path=modelt.txt
+
+[FILE START] path=process_local_images.py lang=python
+
+# process_local_images.py
+import asyncio
+import os
+import json
+import time
+# Ensure we can import from the app module
+import sys
+sys.path.append(os.getcwd())
+
+from app.ai_engine import analyze_image_local
+
+PICTURES_DIR = "pictures"
+
+async def main():
+    # Check if directory exists
+    if not os.path.exists(PICTURES_DIR):
+        print(f"❌ Error: Directory '{PICTURES_DIR}' not found.")
+        print("Please create it and add .jpg/.png files.")
+        return
+
+    # Get list of images
+    files = [f for f in os.listdir(PICTURES_DIR) if f.lower().endswith(('.png', '.jpg', '.jpeg', '.webp'))]
+    files.sort()
+
+    if not files:
+        print(f"⚠️  No images found in '{PICTURES_DIR}'.")
+        return
+
+    print(f"🔎 Found {len(files)} images. Starting local AI analysis...\n")
+    print("="*60)
+
+    for i, filename in enumerate(files, 1):
+        filepath = os.path.join(PICTURES_DIR, filename)
+        print(f"[{i}/{len(files)}] Processing: {filename}...")
+        
+        start_time = time.time()
+        
+        try:
+            with open(filepath, "rb") as f:
+                image_bytes = f.read()
+            
+            # Call the AI Engine
+            result = await analyze_image_local(image_bytes, context="Batch processing test")
+            
+            elapsed = time.time() - start_time
+            
+            # Print Result
+            print(f"✅ Finished in {elapsed:.2f}s")
+            print(json.dumps(result, indent=2))
+            
+        except Exception as e:
+            print(f"❌ Failed: {str(e)}")
+            
+        print("-" * 60)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+[FILE END] path=process_local_images.py
+
+[FILE START] path=README.md lang=markdown
+
+
+### model download
+
+```
+HF_HUB_ENABLE_HF_TRANSFER=1 .venv/bin/huggingface-cli download Qwen/Qwen2-VL-2B-Instruct
+```
+
+[FILE END] path=README.md
+
+[FILE START] path=requirements.txt lang=text
+
+fastapi
+uvicorn
+python-multipart
+sqlmodel
+psycopg2-binary
+python-dotenv
+pillow
+requests
+openai
+[FILE END] path=requirements.txt
+

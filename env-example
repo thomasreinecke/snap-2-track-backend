@@ -1,0 +1,16 @@
+
+# database configuration
+DB_DATABASE=
+DB_USER=postgres
+DB_PASSWORD=
+DB_HOST=
+DB_PORT=
+
+# openrouter AI model configuration
+MODEL_ID=qwen/qwen-2-vl-72b-instruct
+AI_PROVIDER=openrouter
+OPENROUTER_API_KEY=
+SITE_URL=https://snap-2-track.local
+APP_NAME=Snap-2-Track
+
+# ALTERNATIVE: google gemini flash (free tier)

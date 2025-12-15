@@ -1,0 +1,22 @@
+# docker-compose.yml
+services:
+  snap-2-track-backend:
+    container_name: snap-2-track-backend
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      # Map Host Port 8090 (Unraid) -> Container Port 8000
+      # Change 8090 if it conflicts with another Unraid service
+      - "8090:8000"
+    volumes:
+      # PERSISTENCE: Map the local uploads folder to the container
+      # This ensures images survive container rebuilds
+      - ./uploads:/app/uploads
+    env_file:
+      # The GitHub Action creates this file from secrets before running compose
+      - .env
+    extra_hosts:
+      # Allows container to reach host services if needed (e.g. Postgres on Host IP)
+      - "host.docker.internal:host-gateway"

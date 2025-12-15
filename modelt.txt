@@ -1,0 +1,86 @@
+"-- =============================================
+-- DDL for public.image_store
+-- =============================================
+CREATE TABLE public.image_store (
+    id uuid NOT NULL,
+    data bytea NOT NULL,
+    mime_type character varying DEFAULT 'image/jpeg'::character varying,
+    CONSTRAINT image_store_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX image_store_pkey ON public.image_store USING btree (id);
+
+-- =============================================
+-- DDL for public.meal
+-- =============================================
+CREATE TABLE public.meal (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    friendly_id character varying NOT NULL,
+    status character varying DEFAULT 'draft'::character varying,
+    image_id uuid,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT meal_image_id_fkey FOREIGN KEY (image_id) REFERENCES image_store(id) ON DELETE SET NULL,
+    CONSTRAINT meal_user_id_fkey FOREIGN KEY (user_id) REFERENCES ""user""(id) ON DELETE CASCADE,
+    CONSTRAINT meal_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX meal_pkey ON public.meal USING btree (id);
+CREATE INDEX idx_meal_user_id ON public.meal USING btree (user_id);
+
+-- =============================================
+-- DDL for public.message
+-- =============================================
+CREATE TABLE public.message (
+    id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    meal_id uuid,
+    image_id uuid,
+    sender character varying NOT NULL,
+    text text,
+    ""timestamp"" timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT message_image_id_fkey FOREIGN KEY (image_id) REFERENCES image_store(id) ON DELETE SET NULL,
+    CONSTRAINT message_meal_id_fkey FOREIGN KEY (meal_id) REFERENCES meal(id) ON DELETE SET NULL,
+    CONSTRAINT message_user_id_fkey FOREIGN KEY (user_id) REFERENCES ""user""(id) ON DELETE CASCADE,
+    CONSTRAINT message_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX message_pkey ON public.message USING btree (id);
+CREATE INDEX idx_message_user_id ON public.message USING btree (user_id);
+
+-- =============================================
+-- DDL for public.nutrition_log
+-- =============================================
+CREATE TABLE public.nutrition_log (
+    id uuid NOT NULL,
+    meal_id uuid NOT NULL,
+    item_name character varying NOT NULL,
+    meal_type character varying DEFAULT 'snack'::character varying,
+    is_composed_meal boolean DEFAULT false,
+    estimated_weight_g integer DEFAULT 0,
+    calories_kcal integer NOT NULL,
+    protein_g integer NOT NULL,
+    carbs_g integer NOT NULL,
+    fat_g integer NOT NULL,
+    fiber_g integer DEFAULT 0,
+    confidence_score double precision DEFAULT 0.0,
+    reasoning text,
+    dietary_flags json,
+    raw_json text NOT NULL,
+    CONSTRAINT nutrition_log_meal_id_fkey FOREIGN KEY (meal_id) REFERENCES meal(id) ON DELETE CASCADE,
+    CONSTRAINT nutrition_log_pkey PRIMARY KEY (id)
+);
+CREATE UNIQUE INDEX nutrition_log_pkey ON public.nutrition_log USING btree (id);
+CREATE INDEX idx_nutrition_log_meal_id ON public.nutrition_log USING btree (meal_id);
+
+-- =============================================
+-- DDL for public.""user""
+-- =============================================
+CREATE TABLE public.""user"" (
+    id uuid NOT NULL,
+    identifier character varying NOT NULL,
+    platform character varying DEFAULT 'web'::character varying,
+    created_at timestamp without time zone DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT user_pkey PRIMARY KEY (id),
+    CONSTRAINT user_identifier_key UNIQUE (identifier)
+);
+CREATE UNIQUE INDEX user_pkey ON public.""user"" USING btree (id);
+CREATE UNIQUE INDEX user_identifier_key ON public.""user"" USING btree (identifier);
+"

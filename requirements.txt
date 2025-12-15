@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+python-multipart
+sqlmodel
+psycopg2-binary
+python-dotenv
+pillow
+requests
+openai
