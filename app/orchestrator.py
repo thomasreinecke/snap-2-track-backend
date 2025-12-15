@@ -24,7 +24,7 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         session.commit()
         session.refresh(user)
 
-    # 2. Image
+    # 2. Image (Stored in DB)
     img_id = None
     if image_bytes:
         new_image = ImageStore(data=image_bytes, mime_type="image/jpeg")
@@ -141,7 +141,6 @@ def get_chat_history(session: Session, user_identifier: str):
     for m in msgs:
         img_url = None
         if m.image_id:
-            # Construct absolute URL using the env variable
             img_url = f"{BACKEND_ENDPOINT}/api/image/{str(m.image_id)}"
         
         results.append({

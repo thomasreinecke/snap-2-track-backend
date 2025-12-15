@@ -1,0 +1,40 @@
+# .github/workflows/deploy-unraid.yml
+name: Deploy Backend to Unraid
+
+on:
+  push:
+    branches: [ "main" ]
+    # Trigger on relevant backend changes
+    paths:
+      - 'app/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'Makefile'
+      - '.github/workflows/deploy-unraid.yml'
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, unraid]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Inject Secrets into .env
+      - name: Create .env file
+        run: |
+          echo "${{ secrets.PROD_ENV_FILE }}" > .env
+          echo "✅ .env file created."
+
+      # Build & Deploy
+      - name: Deploy with Docker Compose
+        run: |
+          echo "🚀 Building container..."
+          docker compose down || true
+          docker compose up -d --build --remove-orphans
+          
+          echo "🧹 Cleaning up..."
+          docker image prune -f
+          
+          echo "✅ Deployment complete."

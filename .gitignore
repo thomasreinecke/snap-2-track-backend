@@ -27,7 +27,7 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
-_iapa-backend-composition.txt 
+_snap-2-track-backend-composition.txt
 martech/*csv
 
 # PyInstaller
