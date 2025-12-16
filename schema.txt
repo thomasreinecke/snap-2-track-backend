@@ -1,4 +1,4 @@
-"-- =============================================
+-- =============================================
 -- DDL for public.image_store
 -- =============================================
 CREATE TABLE public.image_store (
@@ -60,6 +60,7 @@ CREATE TABLE public.nutrition_log (
     carbs_g integer NOT NULL,
     fat_g integer NOT NULL,
     fiber_g integer DEFAULT 0,
+    edited boolean DEFAULT false,
     confidence_score double precision DEFAULT 0.0,
     reasoning text,
     dietary_flags json,
@@ -83,4 +84,3 @@ CREATE TABLE public.""user"" (
 );
 CREATE UNIQUE INDEX user_pkey ON public.""user"" USING btree (id);
 CREATE UNIQUE INDEX user_identifier_key ON public.""user"" USING btree (identifier);
-"
