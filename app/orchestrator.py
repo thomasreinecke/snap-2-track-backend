@@ -118,7 +118,7 @@ def update_meal_nutrition(session: Session, meal_id: str, updates: dict):
         if not log:
             return False
         
-        # 1. Snapshot Logic: Capture original AI state before first edit
+        # 1. Snapshot Logic
         if not log.original_nutrition_snapshot:
             snapshot = {
                 "calories_kcal": log.calories_kcal,
@@ -191,7 +191,6 @@ def get_user_history_summary(session: Session, user_identifier: str):
                 "fiber": log.fiber_g
             },
             "edited": log.edited,
-            # Pass back existing feedback so modal can populate it if needed (optional, good for UX)
             "user_rating": log.user_rating,
             "user_feedback_text": log.user_feedback_text
         })
@@ -220,15 +219,18 @@ def delete_meal(session: Session, meal_id: str):
 def get_chat_history(session: Session, user_identifier: str):
     user = session.exec(select(User).where(User.identifier == user_identifier)).first()
     if not user: return []
+    
+    # Updated Query: Join NutritionLog to get user_rating
     results = session.exec(
-        select(Message, Meal.friendly_id, Meal.id)
+        select(Message, Meal.friendly_id, Meal.id, NutritionLog.user_rating)
         .outerjoin(Meal, Message.meal_id == Meal.id)
+        .outerjoin(NutritionLog, Meal.id == NutritionLog.meal_id)
         .where(Message.user_id == user.id)
         .order_by(Message.timestamp)
     ).all()
+    
     chat_data = []
-    # Updated to unpack 3 values (Message, friendly_id, meal_id)
-    for msg, friendly_id, meal_id in results:
+    for msg, friendly_id, meal_id, user_rating in results:
         img_url = f"/api/image/{str(msg.image_id)}" if msg.image_id else None
         chat_data.append({
             "id": str(msg.id),
@@ -237,7 +239,8 @@ def get_chat_history(session: Session, user_identifier: str):
             "imageUrl": img_url,
             "timestamp": msg.timestamp,
             "mealLabel": friendly_id,
-            "mealId": str(meal_id) if meal_id else None # Pass the actual meal ID for editing
+            "mealId": str(meal_id) if meal_id else None,
+            "userRating": user_rating # New field
         })
     return chat_data
 
