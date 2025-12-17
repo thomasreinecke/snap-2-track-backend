@@ -39,13 +39,13 @@ async def main():
             with open(filepath, "rb") as f:
                 image_bytes = f.read()
             
-            # Call the AI Engine
-            result = await analyze_image_local(image_bytes, context="Batch processing test")
+            # Call the AI Engine (updated to unpack cost)
+            result, cost = await analyze_image_local(image_bytes, context="Batch processing test")
             
             elapsed = time.time() - start_time
             
             # Print Result
-            print(f"✅ Finished in {elapsed:.2f}s")
+            print(f"✅ Finished in {elapsed:.2f}s | Cost: ${cost:.6f}")
             print(json.dumps(result, indent=2))
             
         except Exception as e:

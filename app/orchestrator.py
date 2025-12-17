@@ -37,17 +37,25 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
     active_meal = _get_latest_active_meal(session, user.id)
     ai_result = {}
     bot_reply_text = ""
+    inference_cost = 0.0
 
     # 4. Processing
     if image_bytes:
         context_str = text if text else "New meal log"
-        ai_result = await analyze_image_local(image_bytes, context=context_str, language=language)
+        ai_result, inference_cost = await analyze_image_local(image_bytes, context=context_str, language=language)
         print(f"   🤖 AI: {json.dumps(ai_result, indent=2)}")
+        print(f"   💰 Cost: ${inference_cost:.6f}")
         
         if ai_result.get("is_food", False) is True:
             friendly_id = _generate_friendly_id(session, user.id, ai_result.get("meal_type", "snack"))
             
-            new_meal = Meal(user_id=user.id, friendly_id=friendly_id, status="draft", image_id=img_id)
+            new_meal = Meal(
+                user_id=user.id, 
+                friendly_id=friendly_id, 
+                status="draft", 
+                image_id=img_id,
+                total_cost=inference_cost
+            )
             session.add(new_meal)
             session.commit()
             session.refresh(new_meal)
@@ -67,10 +75,16 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         last_log = session.exec(select(NutritionLog).where(NutritionLog.meal_id == active_meal.id)).first()
         current_data = json.loads(last_log.raw_json) if last_log else {}
         
-        ai_result = await analyze_text_correction(current_data, text, language=language)
+        ai_result, inference_cost = await analyze_text_correction(current_data, text, language=language)
         print(f"   🤖 Correction: {json.dumps(ai_result, indent=2)}")
+        print(f"   💰 Cost: ${inference_cost:.6f}")
         
         _update_log(session, last_log, ai_result)
+        
+        active_meal.total_cost += inference_cost
+        session.add(active_meal)
+        session.commit()
+        
         bot_reply_text = ai_result.get("reply_text", "Updated.")
         
         user_msg.meal_id = active_meal.id
@@ -78,18 +92,23 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         session.commit()
         
     else:
-        # NOTE: Hardcoded fallback strings could be localized here if desired, 
-        # but for now we focus on AI responses.
         bot_reply_text = "Please send a photo to start tracking! 📸"
 
-    bot_msg = Message(user_id=user.id, meal_id=active_meal.id if active_meal else None, sender="bot", text=bot_reply_text)
+    bot_msg = Message(
+        user_id=user.id, 
+        meal_id=active_meal.id if active_meal else None, 
+        sender="bot", 
+        text=bot_reply_text,
+        cost=inference_cost 
+    )
     session.add(bot_msg)
     session.commit()
 
     return {
         "reply": bot_reply_text,
         "transaction_id": active_meal.friendly_id if active_meal else None,
-        "data": ai_result if ai_result.get("is_food", False) else None
+        "data": ai_result if ai_result.get("is_food", False) else None,
+        "cost": inference_cost
     }
 
 def update_meal_nutrition(session: Session, meal_id: str, updates: dict):
@@ -99,12 +118,28 @@ def update_meal_nutrition(session: Session, meal_id: str, updates: dict):
         if not log:
             return False
         
-        # Apply updates
+        # 1. Snapshot Logic: Capture original AI state before first edit
+        if not log.original_nutrition_snapshot:
+            snapshot = {
+                "calories_kcal": log.calories_kcal,
+                "protein_g": log.protein_g,
+                "carbs_g": log.carbs_g,
+                "fat_g": log.fat_g,
+                "fiber_g": log.fiber_g,
+                "item_name": log.item_name
+            }
+            log.original_nutrition_snapshot = json.dumps(snapshot)
+
+        # 2. Apply updates
         if 'calories_kcal' in updates: log.calories_kcal = updates['calories_kcal']
         if 'protein_g' in updates: log.protein_g = updates['protein_g']
         if 'carbs_g' in updates: log.carbs_g = updates['carbs_g']
         if 'fat_g' in updates: log.fat_g = updates['fat_g']
         if 'fiber_g' in updates: log.fiber_g = updates['fiber_g']
+        
+        # 3. Apply Feedback
+        if 'user_rating' in updates: log.user_rating = updates['user_rating']
+        if 'user_feedback_text' in updates: log.user_feedback_text = updates['user_feedback_text']
         
         log.edited = True
         session.add(log)
@@ -134,7 +169,6 @@ def get_user_history_summary(session: Session, user_identifier: str):
         day_entry = history_map[date_key]
         day_entry["date"] = date_key
         
-        # Aggregates
         day_entry["totals"]["calories"] += log.calories_kcal
         day_entry["totals"]["protein"] += log.protein_g
         day_entry["totals"]["carbs"] += log.carbs_g
@@ -143,7 +177,6 @@ def get_user_history_summary(session: Session, user_identifier: str):
         
         img_url = f"/api/image/{str(meal.image_id)}" if meal.image_id else None
 
-        # Detailed meal info for Edit modal
         day_entry["meals"].append({
             "id": str(meal.id),
             "time": meal.created_at.strftime("%H:%M"),
@@ -157,7 +190,10 @@ def get_user_history_summary(session: Session, user_identifier: str):
                 "fat": log.fat_g,
                 "fiber": log.fiber_g
             },
-            "edited": log.edited
+            "edited": log.edited,
+            # Pass back existing feedback so modal can populate it if needed (optional, good for UX)
+            "user_rating": log.user_rating,
+            "user_feedback_text": log.user_feedback_text
         })
 
     result = list(history_map.values())
@@ -185,13 +221,14 @@ def get_chat_history(session: Session, user_identifier: str):
     user = session.exec(select(User).where(User.identifier == user_identifier)).first()
     if not user: return []
     results = session.exec(
-        select(Message, Meal.friendly_id)
+        select(Message, Meal.friendly_id, Meal.id)
         .outerjoin(Meal, Message.meal_id == Meal.id)
         .where(Message.user_id == user.id)
         .order_by(Message.timestamp)
     ).all()
     chat_data = []
-    for msg, friendly_id in results:
+    # Updated to unpack 3 values (Message, friendly_id, meal_id)
+    for msg, friendly_id, meal_id in results:
         img_url = f"/api/image/{str(msg.image_id)}" if msg.image_id else None
         chat_data.append({
             "id": str(msg.id),
@@ -199,7 +236,8 @@ def get_chat_history(session: Session, user_identifier: str):
             "text": msg.text,
             "imageUrl": img_url,
             "timestamp": msg.timestamp,
-            "mealLabel": friendly_id 
+            "mealLabel": friendly_id,
+            "mealId": str(meal_id) if meal_id else None # Pass the actual meal ID for editing
         })
     return chat_data
 

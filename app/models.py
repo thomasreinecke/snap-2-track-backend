@@ -29,6 +29,8 @@ class Meal(SQLModel, table=True):
     image_id: Optional[UUID] = Field(default=None, foreign_key="image_store.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
+    total_cost: float = Field(default=0.0)
+    
     user: User = Relationship(back_populates="meals")
     logs: List["NutritionLog"] = Relationship(back_populates="meal")
 
@@ -48,8 +50,12 @@ class NutritionLog(SQLModel, table=True):
     fat_g: int
     fiber_g: int = Field(default=0)
     
-    # New Field
     edited: bool = Field(default=False)
+    
+    # New Fields for Feedback Loop
+    user_rating: Optional[str] = None # 'up' or 'down'
+    user_feedback_text: Optional[str] = None
+    original_nutrition_snapshot: Optional[str] = None # JSON string
     
     confidence_score: float = Field(default=0.0)
     reasoning: Optional[str] = None
@@ -68,3 +74,5 @@ class Message(SQLModel, table=True):
     sender: str 
     text: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
+    
+    cost: float = Field(default=0.0)

@@ -72,18 +72,23 @@ async def analyze_image_local(image_bytes: bytes, context: str = "", language: s
                 {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}
             ],
             temperature=0.4,
-            max_tokens=1000
+            max_tokens=1000,
+            extra_body={"include_usage": True}
         )
-        return _clean_json(response.choices[0].message.content)
+        
+        cost = _extract_cost(response)
+        data = _clean_json(response.choices[0].message.content)
+        return data, cost
 
     except Exception as e:
         print(f"❌ OpenRouter API Error: {str(e)}")
+        # Return 0.0 cost on error
         return {
             "is_food": False,
             "item_name": "API Error",
             "reply_text": f"My brain is offline momentarily! 🤯 Error: {str(e)}",
             "nutrition": {"calories_kcal": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
-        }
+        }, 0.0
 
 async def analyze_text_correction(current_log: dict, user_text: str, language: str = "en"):
     prompt = f"""
@@ -104,11 +109,29 @@ async def analyze_text_correction(current_log: dict, user_text: str, language: s
         response = client.chat.completions.create(
             model=MODEL_ID,
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2
+            temperature=0.2,
+            extra_body={"include_usage": True}
         )
-        return _clean_json(response.choices[0].message.content)
+        
+        cost = _extract_cost(response)
+        data = _clean_json(response.choices[0].message.content)
+        return data, cost
+        
     except Exception as e:
-        return current_log
+        print(f"❌ Correction Error: {e}")
+        return current_log, 0.0
+
+def _extract_cost(response):
+    try:
+        # OpenRouter returns cost in the usage object.
+        # We try to dump the model to dict to access dynamic/extra fields
+        if hasattr(response, 'usage') and response.usage:
+            # Try pydantic v2 dump or standard dict conversion
+            usage_dict = response.usage.model_dump() if hasattr(response.usage, 'model_dump') else response.usage.__dict__
+            return float(usage_dict.get('cost', 0.0))
+    except Exception as e:
+        print(f"⚠️ Could not extract cost: {e}")
+    return 0.0
 
 def _clean_json(text: str):
     text = text.replace("```json", "").replace("```", "").strip()
