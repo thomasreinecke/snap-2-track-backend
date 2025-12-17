@@ -1,4 +1,4 @@
--- =============================================
+"-- =============================================
 -- DDL for public.image_store
 -- =============================================
 CREATE TABLE public.image_store (
@@ -84,3 +84,4 @@ CREATE TABLE public.""user"" (
 );
 CREATE UNIQUE INDEX user_pkey ON public.""user"" USING btree (id);
 CREATE UNIQUE INDEX user_identifier_key ON public.""user"" USING btree (identifier);
+"

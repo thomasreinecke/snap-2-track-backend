@@ -45,6 +45,11 @@ run-batch:
 	@echo "📸 Processing images in ./pictures..."
 	@$(PYTHON) process_local_images.py
 
+generate-key:
+	@echo "Generating key"
+	@$(PYTHON) generate_key.py
+
+
 # -----------------------------------------------------------------------------
 # 🧹 Cleanup
 # -----------------------------------------------------------------------------

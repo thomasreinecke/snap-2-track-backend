@@ -10,8 +10,8 @@ from collections import defaultdict
 from uuid import UUID
 import traceback
 
-async def handle_message(session: Session, user_identifier: str, text: str = None, image_bytes: bytes = None):
-    print(f"\n📨 [NEW MSG] User: {user_identifier} | Text: {text} | Img: {len(image_bytes) if image_bytes else 0}b")
+async def handle_message(session: Session, user_identifier: str, text: str = None, image_bytes: bytes = None, language: str = "en"):
+    print(f"\n📨 [NEW MSG] User: {user_identifier} | Lang: {language} | Text: {text} | Img: {len(image_bytes) if image_bytes else 0}b")
 
     # 1. User
     user = session.exec(select(User).where(User.identifier == user_identifier)).first()
@@ -41,7 +41,7 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
     # 4. Processing
     if image_bytes:
         context_str = text if text else "New meal log"
-        ai_result = await analyze_image_local(image_bytes, context=context_str)
+        ai_result = await analyze_image_local(image_bytes, context=context_str, language=language)
         print(f"   🤖 AI: {json.dumps(ai_result, indent=2)}")
         
         if ai_result.get("is_food", False) is True:
@@ -67,7 +67,7 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         last_log = session.exec(select(NutritionLog).where(NutritionLog.meal_id == active_meal.id)).first()
         current_data = json.loads(last_log.raw_json) if last_log else {}
         
-        ai_result = await analyze_text_correction(current_data, text)
+        ai_result = await analyze_text_correction(current_data, text, language=language)
         print(f"   🤖 Correction: {json.dumps(ai_result, indent=2)}")
         
         _update_log(session, last_log, ai_result)
@@ -78,6 +78,8 @@ async def handle_message(session: Session, user_identifier: str, text: str = Non
         session.commit()
         
     else:
+        # NOTE: Hardcoded fallback strings could be localized here if desired, 
+        # but for now we focus on AI responses.
         bot_reply_text = "Please send a photo to start tracking! 📸"
 
     bot_msg = Message(user_id=user.id, meal_id=active_meal.id if active_meal else None, sender="bot", text=bot_reply_text)
@@ -149,7 +151,6 @@ def get_user_history_summary(session: Session, user_identifier: str):
             "name": log.item_name,
             "calories": log.calories_kcal,
             "image_url": img_url,
-            # Add macro details for the individual meal
             "macros": {
                 "protein": log.protein_g,
                 "carbs": log.carbs_g,
@@ -163,7 +164,6 @@ def get_user_history_summary(session: Session, user_identifier: str):
     result.sort(key=lambda x: x["date"], reverse=True)
     return result
 
-# ... (Helpers like get_chat_history, reset_user, delete_meal, etc. remain unchanged)
 def delete_meal(session: Session, meal_id: str):
     try:
         clean_id = meal_id.strip()
@@ -204,11 +204,35 @@ def get_chat_history(session: Session, user_identifier: str):
     return chat_data
 
 def reset_user(session: Session, user_identifier: str):
-    user = session.exec(select(User).where(User.identifier == user_identifier)).first()
-    if not user: return False
-    session.delete(user)
-    session.commit()
-    return True
+    try:
+        user = session.exec(select(User).where(User.identifier == user_identifier)).first()
+        if not user: 
+            return False
+        
+        print(f"🗑️ Deleting user {user.id} ({user_identifier}) and all data...")
+
+        messages = session.exec(select(Message).where(Message.user_id == user.id)).all()
+        for msg in messages:
+            session.delete(msg)
+        
+        meals = session.exec(select(Meal).where(Meal.user_id == user.id)).all()
+        
+        for meal in meals:
+            logs = session.exec(select(NutritionLog).where(NutritionLog.meal_id == meal.id)).all()
+            for log in logs:
+                session.delete(log)
+            session.delete(meal)
+            
+        session.delete(user)
+        session.commit()
+        print("✅ User Reset Complete.")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Reset failed: {str(e)}")
+        traceback.print_exc()
+        session.rollback()
+        return False
 
 def _get_latest_active_meal(session, user_id):
     return session.exec(select(Meal).where(Meal.user_id == user_id).order_by(Meal.created_at.desc())).first()

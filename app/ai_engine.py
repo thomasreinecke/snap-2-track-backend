@@ -21,7 +21,7 @@ client = OpenAI(
     }
 )
 
-async def analyze_image_local(image_bytes: bytes, context: str = ""):
+async def analyze_image_local(image_bytes: bytes, context: str = "", language: str = "en"):
     base64_image = base64.b64encode(image_bytes).decode('utf-8')
     image_url = f"data:image/jpeg;base64,{base64_image}"
 
@@ -46,21 +46,23 @@ async def analyze_image_local(image_bytes: bytes, context: str = ""):
     }
     """
 
-    system_prompt = f"""You are 'Snap-2-Track'. Analyze the food image. Context: "{context}"
+    system_prompt = f"""You are 'Snap-2-Track', a culinary expert with a sharp eye for nutrition.
+    Analyze the food image. Context provided by user: "{context}"
     
     GUIDELINES FOR 'reply_text':
-    1. **Describe Visuals:** Briefly describe what you see (colors, textures, plating).
-    2. **State Macros:** You MUST explicitly list the identified macros in the text (e.g. "I estimate ~500 kcal, 30g Protein, ...").
-    3. **NO PREACHING:** Do NOT give health advice, do NOT say "watch your sugar", do NOT say "this is a healthy choice". Just state the facts of the food.
-    4. **Tone:** Neutral, observant, professional but casual.
-    
-    If text context adds items (e.g. "plus a beer"), include them in math and text.
+    1. **Natural & Varied:** React to the dish naturally. **Do NOT** start with "The image shows", "This is", or "I see". 
+       - Instead, dive straight into the details: "That golden crust looks perfectly baked!" or "A vibrant bowl of fresh greens."
+    2. **Emotion/Vibe:** Include a touch of appreciation for the food's appeal or 'comfort' level. Be professional but human.
+    3. **Macros:** You MUST explicitly weave the key macro numbers into the narrative (e.g., "...packing about 600 kcal with 30g Protein").
+    4. **Length:** Keep it concise (2-3 sentences max).
+    5. **NO PREACHING:** No health advice, no judgment. Just the food facts and the vibe.
+    6. **LANGUAGE:** You MUST write the 'reply_text' and 'item_name' in this language: [{language}]. The JSON keys must remain in English.
 
     Return ONLY valid JSON:
     {schema_definition}
     """
 
-    print(f"🚀 Sending request to OpenRouter ({MODEL_ID})...")
+    print(f"🚀 Sending request to OpenRouter ({MODEL_ID})... [Lang: {language}]")
 
     try:
         response = client.chat.completions.create(
@@ -69,7 +71,7 @@ async def analyze_image_local(image_bytes: bytes, context: str = ""):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": [{"type": "image_url", "image_url": {"url": image_url}}]}
             ],
-            temperature=0.2, 
+            temperature=0.4,
             max_tokens=1000
         )
         return _clean_json(response.choices[0].message.content)
@@ -83,14 +85,17 @@ async def analyze_image_local(image_bytes: bytes, context: str = ""):
             "nutrition": {"calories_kcal": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
         }
 
-async def analyze_text_correction(current_log: dict, user_text: str):
+async def analyze_text_correction(current_log: dict, user_text: str, language: str = "en"):
     prompt = f"""
     Current Meal Data: {json.dumps(current_log)}
     User Correction: "{user_text}"
+    Target Language: {language}
     
     Task:
-    1. Update 'item_name', 'nutrition' totals.
-    2. 'reply_text': Confirm the change AND list the new total macros. 
+    1. Update 'item_name', 'nutrition' totals based on the user's input.
+    2. 'reply_text': Acknowledge the change naturally and professionally in [{language}].
+       - Example: "Got it, added the extra slice. That brings it to..."
+       - Confirm the new total macros in the text.
     3. NO PREACHING.
 
     Return ONLY the updated JSON.
