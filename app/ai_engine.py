@@ -2,6 +2,7 @@
 import os
 import base64
 import json
+import time
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -63,6 +64,7 @@ async def analyze_image_local(image_bytes: bytes, context: str = "", language: s
     """
 
     print(f"🚀 Sending request to OpenRouter ({MODEL_ID})... [Lang: {language}]")
+    start_time = time.time()
 
     try:
         response = client.chat.completions.create(
@@ -76,19 +78,27 @@ async def analyze_image_local(image_bytes: bytes, context: str = "", language: s
             extra_body={"include_usage": True}
         )
         
+        latency = time.time() - start_time
         cost = _extract_cost(response)
+        raw_metadata = response.model_dump() if hasattr(response, 'model_dump') else response.__dict__
+        
         data = _clean_json(response.choices[0].message.content)
-        return data, cost
+        
+        return {
+            "data": data,
+            "cost": cost,
+            "latency": latency,
+            "metadata": raw_metadata
+        }
 
     except Exception as e:
         print(f"❌ OpenRouter API Error: {str(e)}")
-        # Return 0.0 cost on error
         return {
-            "is_food": False,
-            "item_name": "API Error",
-            "reply_text": f"My brain is offline momentarily! 🤯 Error: {str(e)}",
-            "nutrition": {"calories_kcal": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
-        }, 0.0
+            "data": _error_data(str(e)),
+            "cost": 0.0,
+            "latency": time.time() - start_time,
+            "metadata": {"error": str(e)}
+        }
 
 async def analyze_text_correction(current_log: dict, user_text: str, language: str = "en"):
     prompt = f"""
@@ -105,6 +115,7 @@ async def analyze_text_correction(current_log: dict, user_text: str, language: s
 
     Return ONLY the updated JSON.
     """
+    start_time = time.time()
     try:
         response = client.chat.completions.create(
             model=MODEL_ID,
@@ -113,20 +124,30 @@ async def analyze_text_correction(current_log: dict, user_text: str, language: s
             extra_body={"include_usage": True}
         )
         
+        latency = time.time() - start_time
         cost = _extract_cost(response)
+        raw_metadata = response.model_dump() if hasattr(response, 'model_dump') else response.__dict__
         data = _clean_json(response.choices[0].message.content)
-        return data, cost
+        
+        return {
+            "data": data,
+            "cost": cost,
+            "latency": latency,
+            "metadata": raw_metadata
+        }
         
     except Exception as e:
         print(f"❌ Correction Error: {e}")
-        return current_log, 0.0
+        return {
+            "data": current_log, 
+            "cost": 0.0, 
+            "latency": time.time() - start_time,
+            "metadata": {"error": str(e)}
+        }
 
 def _extract_cost(response):
     try:
-        # OpenRouter returns cost in the usage object.
-        # We try to dump the model to dict to access dynamic/extra fields
         if hasattr(response, 'usage') and response.usage:
-            # Try pydantic v2 dump or standard dict conversion
             usage_dict = response.usage.model_dump() if hasattr(response.usage, 'model_dump') else response.usage.__dict__
             return float(usage_dict.get('cost', 0.0))
     except Exception as e:
@@ -140,19 +161,15 @@ def _clean_json(text: str):
     if start_idx != -1 and end_idx != -1:
         text = text[start_idx : end_idx + 1]
     
-    data = {}
     try:
-        data = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
-        data = {
-            "is_food": False,
-            "item_name": "Parsing Error",
-            "reply_text": "I saw the food, but I tripped over the math. Try again? 📉",
-            "reasoning": f"Raw output: {text[:50]}..."
-        }
-    
-    # Strip whitespace from reply_text if it exists
-    if "reply_text" in data and isinstance(data["reply_text"], str):
-        data["reply_text"] = data["reply_text"].strip()
-        
-    return data
+        return _error_data(f"Raw output: {text[:50]}...")
+
+def _error_data(msg):
+    return {
+        "is_food": False,
+        "item_name": "Error",
+        "reply_text": f"System error: {msg}",
+        "nutrition": {"calories_kcal": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0}
+    }

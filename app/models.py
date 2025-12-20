@@ -29,6 +29,7 @@ class Meal(SQLModel, table=True):
     image_id: Optional[UUID] = Field(default=None, foreign_key="image_store.id")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     
+    # Aggregated Cost
     total_cost: float = Field(default=0.0)
     
     user: User = Relationship(back_populates="meals")
@@ -52,10 +53,9 @@ class NutritionLog(SQLModel, table=True):
     
     edited: bool = Field(default=False)
     
-    # New Fields for Feedback Loop
-    user_rating: Optional[str] = None # 'up' or 'down'
+    user_rating: Optional[str] = None 
     user_feedback_text: Optional[str] = None
-    original_nutrition_snapshot: Optional[str] = None # JSON string
+    original_nutrition_snapshot: Optional[str] = None 
     
     confidence_score: float = Field(default=0.0)
     reasoning: Optional[str] = None
@@ -75,4 +75,8 @@ class Message(SQLModel, table=True):
     text: Optional[str] = None
     timestamp: datetime = Field(default_factory=datetime.utcnow)
     
+    # Financial & Technical Metrics
     cost: float = Field(default=0.0)
+    latency_seconds: float = Field(default=0.0)
+    # Store full OpenRouter metadata (model, tokens, finish_reason)
+    provider_response: dict = Field(default={}, sa_column=Column(JSON))
